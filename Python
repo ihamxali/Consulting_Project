@@ -1,0 +1,566 @@
+#!/usr/bin/env python3
+"""
+HostEase Dynamic Pricing Implementation
+AI-driven dynamic pricing system for short-term rental properties
+
+
+
+Master 1 BDEEM - Supervised Project in AI 2024-2025
+"""
+
+import os
+import logging
+from datetime import datetime, timedelta
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
+import pandas as pd
+import numpy as np
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+import joblib
+import requests
+import sqlite3
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+import uvicorn
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+@dataclass
+class PropertyData:
+    """Property information structure"""
+    property_id: str
+    location: str
+    property_type: str
+    bedrooms: int
+    bathrooms: int
+    amenities: List[str]
+    base_price: float
+    rating: float
+    reviews_count: int
+
+@dataclass
+class MarketData:
+    """Market conditions data structure"""
+    date: datetime
+    location: str
+    competitor_avg_price: float
+    demand_score: float
+    seasonality_factor: float
+    event_impact: float
+    weather_score: float
+
+class DataCollector:
+    """Handles data collection from various sources"""
+    
+    def __init__(self):
+        self.weather_api_key = os.getenv('OPENWEATHER_API_KEY', 'demo_key')
+        self.event_api_key = os.getenv('EVENTBRITE_API_KEY', 'demo_key')
+    
+    def collect_internal_data(self) -> pd.DataFrame:
+        """Simulate internal booking data collection"""
+        logger.info("Collecting internal booking data...")
+        
+        # Simulate booking history data
+        dates = pd.date_range(start='2024-01-01', end='2024-12-31', freq='D')
+        properties = [f'prop_{i}' for i in range(1, 101)]
+        
+        data = []
+        for date in dates:
+            for prop_id in properties:
+                # Simulate seasonal patterns and random variations
+                base_demand = 0.6 + 0.3 * np.sin(2 * np.pi * date.timetuple().tm_yday / 365.25)
+                weekend_boost = 0.2 if date.weekday() >= 5 else 0
+                random_factor = np.random.normal(0, 0.1)
+                
+                occupancy = max(0, min(1, base_demand + weekend_boost + random_factor))
+                base_price = np.random.uniform(80, 200)
+                
+                data.append({
+                    'date': date,
+                    'property_id': prop_id,
+                    'occupancy': occupancy,
+                    'price': base_price,
+                    'revenue': base_price * occupancy,
+                    'day_of_week': date.weekday(),
+                    'month': date.month,
+                    'is_weekend': date.weekday() >= 5
+                })
+        
+        return pd.DataFrame(data)
+    
+    def collect_competitor_data(self, location: str) -> Dict[str, float]:
+        """Simulate competitor pricing data collection"""
+        logger.info(f"Collecting competitor data for {location}...")
+        
+        # Simulate competitor pricing with some variation
+        competitors = ['airbnb', 'booking', 'vrbo']
+        prices = {}
+        
+        for competitor in competitors:
+            # Simulate different pricing strategies
+            base_price = np.random.uniform(90, 180)
+            seasonal_adjustment = 1 + 0.2 * np.sin(2 * np.pi * datetime.now().timetuple().tm_yday / 365.25)
+            prices[competitor] = base_price * seasonal_adjustment
+        
+        return prices
+    
+    def get_weather_data(self, location: str) -> float:
+        """Get weather impact score (simplified simulation)"""
+        logger.info(f"Getting weather data for {location}...")
+        
+        # Simulate weather impact on demand
+        # Returns score between 0.5 (bad weather) and 1.5 (great weather)
+        return np.random.uniform(0.7, 1.3)
+    
+    def get_event_data(self, location: str, date: datetime) -> float:
+        """Get local events impact score"""
+        logger.info(f"Getting event data for {location} on {date}...")
+        
+        # Simulate event impact (concerts, festivals, conferences)
+        # Returns multiplier: 1.0 (normal), up to 2.0 (major event)
+        event_probability = 0.1  # 10% chance of event
+        if np.random.random() < event_probability:
+            return np.random.uniform(1.2, 2.0)
+        return 1.0
+
+class DynamicPricingModel:
+    """AI-driven dynamic pricing model"""
+    
+    def __init__(self):
+        self.model = RandomForestRegressor(n_estimators=100, random_state=42)
+        self.scaler = StandardScaler()
+        self.is_trained = False
+        self.feature_columns = [
+            'day_of_week', 'month', 'is_weekend', 'occupancy_lag',
+            'competitor_avg_price', 'weather_score', 'event_impact',
+            'seasonality_factor', 'property_rating', 'reviews_count'
+        ]
+    
+    def prepare_features(self, data: pd.DataFrame) -> pd.DataFrame:
+        """Prepare features for model training/prediction"""
+        logger.info("Preparing features for model...")
+        
+        # Create lagged occupancy feature
+        data['occupancy_lag'] = data.groupby('property_id')['occupancy'].shift(1)
+        data['occupancy_lag'].fillna(data['occupancy'].mean(), inplace=True)
+        
+        # Add seasonality
+        data['seasonality_factor'] = 0.8 + 0.4 * np.sin(2 * np.pi * data['month'] / 12)
+        
+        # Simulate competitor and external data
+        data['competitor_avg_price'] = np.random.uniform(90, 180, len(data))
+        data['weather_score'] = np.random.uniform(0.7, 1.3, len(data))
+        data['event_impact'] = np.random.uniform(0.9, 1.5, len(data))
+        data['property_rating'] = np.random.uniform(3.5, 5.0, len(data))
+        data['reviews_count'] = np.random.randint(10, 500, len(data))
+        
+        # Calculate demand score
+        data['demand_score'] = (
+            data['occupancy_lag'] * 0.4 +
+            data['seasonality_factor'] * 0.3 +
+            data['weather_score'] * 0.2 +
+            data['event_impact'] * 0.1
+        )
+        
+        return data[self.feature_columns + ['price', 'revenue']].dropna()
+    
+    def train(self, data: pd.DataFrame):
+        """Train the pricing model"""
+        logger.info("Training dynamic pricing model...")
+        
+        prepared_data = self.prepare_features(data)
+        
+        X = prepared_data[self.feature_columns]
+        y = prepared_data['price']
+        
+        # Split data
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, random_state=42
+        )
+        
+        # Scale features
+        X_train_scaled = self.scaler.fit_transform(X_train)
+        X_test_scaled = self.scaler.transform(X_test)
+        
+        # Train model
+        self.model.fit(X_train_scaled, y_train)
+        
+        # Evaluate
+        y_pred = self.model.predict(X_test_scaled)
+        mae = mean_absolute_error(y_test, y_pred)
+        rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+        
+        logger.info(f"Model trained - MAE: {mae:.2f}, RMSE: {rmse:.2f}")
+        self.is_trained = True
+        
+        return {
+            'mae': mae,
+            'rmse': rmse,
+            'feature_importance': dict(zip(
+                self.feature_columns,
+                self.model.feature_importances_
+            ))
+        }
+    
+    def predict_price(
+        self,
+        property_data: PropertyData,
+        market_data: MarketData,
+        target_date: datetime
+    ) -> Dict[str, float]:
+        """Predict optimal price for a property"""
+        if not self.is_trained:
+            raise ValueError("Model must be trained before making predictions")
+        
+        logger.info(f"Predicting price for property {property_data.property_id}")
+        
+        # Prepare features
+        features = pd.DataFrame([{
+            'day_of_week': target_date.weekday(),
+            'month': target_date.month,
+            'is_weekend': target_date.weekday() >= 5,
+            'occupancy_lag': 0.7,  # Simplified - would use actual historical data
+            'competitor_avg_price': market_data.competitor_avg_price,
+            'weather_score': market_data.weather_score,
+            'event_impact': market_data.event_impact,
+            'seasonality_factor': market_data.seasonality_factor,
+            'property_rating': property_data.rating,
+            'reviews_count': property_data.reviews_count
+        }])
+        
+        # Scale and predict
+        features_scaled = self.scaler.transform(features)
+        predicted_price = self.model.predict(features_scaled)[0]
+        
+        # Apply business rules and constraints
+        min_price = property_data.base_price * 0.7
+        max_price = property_data.base_price * 2.0
+        final_price = max(min_price, min(max_price, predicted_price))
+        
+        return {
+            'predicted_price': float(predicted_price),
+            'final_price': float(final_price),
+            'min_price': float(min_price),
+            'max_price': float(max_price),
+            'price_change_pct': float((final_price - property_data.base_price) / property_data.base_price * 100)
+        }
+    
+    def save_model(self, filepath: str):
+        """Save trained model"""
+        if not self.is_trained:
+            raise ValueError("No trained model to save")
+        
+        model_data = {
+            'model': self.model,
+            'scaler': self.scaler,
+            'feature_columns': self.feature_columns
+        }
+        joblib.dump(model_data, filepath)
+        logger.info(f"Model saved to {filepath}")
+    
+    def load_model(self, filepath: str):
+        """Load trained model"""
+        model_data = joblib.load(filepath)
+        self.model = model_data['model']
+        self.scaler = model_data['scaler']
+        self.feature_columns = model_data['feature_columns']
+        self.is_trained = True
+        logger.info(f"Model loaded from {filepath}")
+
+class PricingService:
+    """Main pricing service orchestrator"""
+    
+    def __init__(self):
+        self.data_collector = DataCollector()
+        self.pricing_model = DynamicPricingModel()
+        self.db_path = 'hostease.db'
+        self.init_database()
+    
+    def init_database(self):
+        """Initialize SQLite database"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # Create properties table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS properties (
+                property_id TEXT PRIMARY KEY,
+                location TEXT,
+                property_type TEXT,
+                bedrooms INTEGER,
+                bathrooms INTEGER,
+                base_price REAL,
+                rating REAL,
+                reviews_count INTEGER
+            )
+        ''')
+        
+        # Create pricing_history table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS pricing_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                property_id TEXT,
+                date DATETIME,
+                predicted_price REAL,
+                final_price REAL,
+                occupancy REAL,
+                revenue REAL,
+                FOREIGN KEY (property_id) REFERENCES properties (property_id)
+            )
+        ''')
+        
+        conn.commit()
+        conn.close()
+        logger.info("Database initialized")
+    
+    def add_sample_properties(self):
+        """Add sample properties for demonstration"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        sample_properties = [
+            ('prop_001', 'Paris_Marais', 'apartment', 2, 1, 120.0, 4.5, 89),
+            ('prop_002', 'Paris_Montmartre', 'apartment', 1, 1, 95.0, 4.2, 67),
+            ('prop_003', 'Lyon_Centre', 'house', 3, 2, 150.0, 4.7, 134),
+            ('prop_004', 'Nice_OldTown', 'apartment', 2, 1, 130.0, 4.3, 78),
+            ('prop_005', 'Marseille_Port', 'loft', 1, 1, 85.0, 4.0, 45)
+        ]
+        
+        cursor.executemany('''
+            INSERT OR REPLACE INTO properties 
+            (property_id, location, property_type, bedrooms, bathrooms, base_price, rating, reviews_count)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', sample_properties)
+        
+        conn.commit()
+        conn.close()
+        logger.info("Sample properties added")
+    
+    def train_model(self):
+        """Train the pricing model with historical data"""
+        logger.info("Starting model training...")
+        
+        # Collect training data
+        historical_data = self.data_collector.collect_internal_data()
+        
+        # Train model
+        metrics = self.pricing_model.train(historical_data)
+        
+        # Save model
+        self.pricing_model.save_model('models/pricing_model.pkl')
+        
+        return metrics
+    
+    def get_price_recommendation(
+        self,
+        property_id: str,
+        target_date: datetime
+    ) -> Dict[str, float]:
+        """Get price recommendation for a property"""
+        
+        # Get property data from database
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT * FROM properties WHERE property_id = ?
+        ''', (property_id,))
+        
+        row = cursor.fetchone()
+        if not row:
+            raise ValueError(f"Property {property_id} not found")
+        
+        property_data = PropertyData(
+            property_id=row[0],
+            location=row[1],
+            property_type=row[2],
+            bedrooms=row[3],
+            bathrooms=row[4],
+            amenities=[],  # Simplified
+            base_price=row[5],
+            rating=row[6],
+            reviews_count=row[7]
+        )
+        
+        # Get market data
+        competitor_prices = self.data_collector.collect_competitor_data(property_data.location)
+        weather_score = self.data_collector.get_weather_data(property_data.location)
+        event_impact = self.data_collector.get_event_data(property_data.location, target_date)
+        
+        market_data = MarketData(
+            date=target_date,
+            location=property_data.location,
+            competitor_avg_price=np.mean(list(competitor_prices.values())),
+            demand_score=0.8,  # Simplified
+            seasonality_factor=0.8 + 0.4 * np.sin(2 * np.pi * target_date.month / 12),
+            event_impact=event_impact,
+            weather_score=weather_score
+        )
+        
+        # Get price prediction
+        price_result = self.pricing_model.predict_price(
+            property_data, market_data, target_date
+        )
+        
+        # Save to history
+        cursor.execute('''
+            INSERT INTO pricing_history 
+            (property_id, date, predicted_price, final_price, occupancy, revenue)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (
+            property_id,
+            target_date,
+            price_result['predicted_price'],
+            price_result['final_price'],
+            0.0,  # Will be updated when booking occurs
+            0.0   # Will be updated when booking occurs
+        ))
+        
+        conn.commit()
+        conn.close()
+        
+        return price_result
+
+# FastAPI Application
+app = FastAPI(title="HostEase Dynamic Pricing API", version="1.0.0")
+
+# Global pricing service instance
+pricing_service = PricingService()
+
+class PriceRequest(BaseModel):
+    property_id: str
+    target_date: str  # ISO format date
+
+class PriceResponse(BaseModel):
+    property_id: str
+    target_date: str
+    predicted_price: float
+    final_price: float
+    price_change_pct: float
+    min_price: float
+    max_price: float
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize the application"""
+    logger.info("Starting HostEase Dynamic Pricing API...")
+    
+    # Add sample properties
+    pricing_service.add_sample_properties()
+    
+    # Train model if not exists
+    if not os.path.exists('models/pricing_model.pkl'):
+        os.makedirs('models', exist_ok=True)
+        logger.info("Training new model...")
+        metrics = pricing_service.train_model()
+        logger.info(f"Model training completed: {metrics}")
+    else:
+        logger.info("Loading existing model...")
+        pricing_service.pricing_model.load_model('models/pricing_model.pkl')
+
+@app.get("/")
+async def root():
+    """API root endpoint"""
+    return {
+        "message": "HostEase Dynamic Pricing API",
+        "version": "1.0.0",
+        "team": "NEXA Consulting",
+        "status": "active"
+    }
+
+@app.post("/predict-price", response_model=PriceResponse)
+async def predict_price(request: PriceRequest):
+    """Predict optimal price for a property"""
+    try:
+        target_date = datetime.fromisoformat(request.target_date)
+        
+        result = pricing_service.get_price_recommendation(
+            request.property_id,
+            target_date
+        )
+        
+        return PriceResponse(
+            property_id=request.property_id,
+            target_date=request.target_date,
+            predicted_price=result['predicted_price'],
+            final_price=result['final_price'],
+            price_change_pct=result['price_change_pct'],
+            min_price=result['min_price'],
+            max_price=result['max_price']
+        )
+        
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+@app.get("/properties")
+async def list_properties():
+    """List all available properties"""
+    conn = sqlite3.connect(pricing_service.db_path)
+    cursor = conn.cursor()
+    
+    cursor.execute('SELECT * FROM properties')
+    properties = cursor.fetchall()
+    
+    conn.close()
+    
+    return {
+        "properties": [
+            {
+                "property_id": prop[0],
+                "location": prop[1],
+                "property_type": prop[2],
+                "bedrooms": prop[3],
+                "bathrooms": prop[4],
+                "base_price": prop[5],
+                "rating": prop[6],
+                "reviews_count": prop[7]
+            }
+            for prop in properties
+        ]
+    }
+
+@app.get("/pricing-history/{property_id}")
+async def get_pricing_history(property_id: str):
+    """Get pricing history for a property"""
+    conn = sqlite3.connect(pricing_service.db_path)
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        SELECT date, predicted_price, final_price, occupancy, revenue
+        FROM pricing_history 
+        WHERE property_id = ?
+        ORDER BY date DESC
+        LIMIT 30
+    ''', (property_id,))
+    
+    history = cursor.fetchall()
+    conn.close()
+    
+    return {
+        "property_id": property_id,
+        "history": [
+            {
+                "date": row[0],
+                "predicted_price": row[1],
+                "final_price": row[2],
+                "occupancy": row[3],
+                "revenue": row[4]
+            }
+            for row in history
+        ]
+    }
+
+if __name__ == "__main__":
+    # Create models directory
+    os.makedirs('models', exist_ok=True)
+    
+    # Run the application
+    logger.info("Starting HostEase Dynamic Pricing System...")
+    uvicorn.run(app, host="0.0.0.0", port=8000)
