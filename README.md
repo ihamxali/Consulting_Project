@@ -4,7 +4,7 @@ An AI-driven dynamic pricing system for short-term rental properties in France, 
 
 ## About the Project
 
-HostEase is a online platform that connects travelers with short-term rental properties in France. This project implements an advanced AI-powered dynamic pricing strategy that adapts to market fluctuations, competitor pricing, seasonal trends, and external factors to maximize revenue and occupancy rates.
+HostEase is a online platform that connects travelers with short-term rental properties in France. This project implements an advanced AI-powered dynamic pricing strategy that adapts to market fluctuations, competitor pricing, seasonal trends, and external factors to maximize revenue and occupancy rates. Prototype - https://soft-crepe-254169.netlify.app/
 
 
 ## Project Objectives
